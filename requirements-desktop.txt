@@ -1,0 +1,6 @@
+# Bundled with each desktop release; no Python/pip required by end users.
+markitdown[all]==0.1.9
+pyinstaller==6.22.3
+# Build-time test fixture generators (not required from end users)
+python-docx==1.2.0
+reportlab==4.4.2

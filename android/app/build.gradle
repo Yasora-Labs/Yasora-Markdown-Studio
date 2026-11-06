@@ -1,0 +1,40 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'org.yasoralabs.markitdown'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'org.yasoralabs.markitdown'
+        minSdk 24
+        targetSdk 35
+        versionCode 4
+        versionName '0.4.0-alpha'
+    }
+    signingConfigs {
+        release {
+            def path = System.getenv('YASORA_KEYSTORE_PATH')
+            if (path) {
+                storeFile file(path)
+                storePassword System.getenv('YASORA_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('YASORA_KEY_ALIAS')
+                keyPassword System.getenv('YASORA_KEY_PASSWORD')
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (System.getenv('YASORA_KEYSTORE_PATH')) signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}

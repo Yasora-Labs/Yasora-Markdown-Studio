@@ -1,0 +1,26 @@
+name: Check MarkItDown upstream releases
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 7 * * 1'
+permissions:
+  contents: read
+  issues: write
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create review issue only when a new stable engine exists
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/check_engine.py > engine-status.txt
+          cat engine-status.txt
+          if grep -q '^ENGINE_UPDATE_AVAILABLE=' engine-status.txt; then
+            latest=$(sed -n 's/^ENGINE_UPDATE_AVAILABLE=//p' engine-status.txt)
+            if ! gh issue list --state open --search "MarkItDown ${latest} engine update in:title" --json number --jq '.[0].number' | grep -q '[0-9]'; then
+              gh issue create --title "Review MarkItDown ${latest} engine update" --body "Review the upstream release and dependency licenses, rebuild all native installers and smoke-test each OS. Never silently pip-update a frozen binary."
+            fi
+          fi

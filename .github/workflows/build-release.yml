@@ -1,0 +1,161 @@
+name: Build all platform installers (draft release only)
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  desktop:
+    name: Desktop ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            label: Windows-x64
+          - os: macos-15
+            label: macOS-arm64
+          - os: macos-15-intel
+            label: macOS-x64
+          - os: ubuntu-22.04
+            label: Linux-amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Linux GUI build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk libx11-6 libxext6 libxrender1
+      - name: Install private build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-desktop.txt
+          python -c "import tkinter, markitdown, PyInstaller; print('Python GUI and engine imports OK')"
+      - name: Run source unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Generate macOS icon
+        if: runner.os == 'macOS'
+        run: bash packaging/macos/create_icns.sh
+      - name: Freeze app and full MarkItDown engine
+        run: python scripts/build_desktop.py
+      - name: Smoke-test frozen engine using real conversion
+        run: python scripts/smoke_desktop.py
+      - name: Windows Inno Setup packaging
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
+          if (!(Test-Path -LiteralPath $iscc)) {
+            choco install innosetup --yes --no-progress
+          }
+          if (!(Test-Path -LiteralPath $iscc)) { throw 'Inno Setup was not installed' }
+          & $iscc 'packaging\windows\YasoraStudio.iss'
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup build failed: $LASTEXITCODE" }
+      - name: macOS DMG packaging
+        if: runner.os == 'macOS'
+        run: bash packaging/macos/build_dmg.sh
+      - name: Linux DEB packaging
+        if: runner.os == 'Linux'
+        run: bash packaging/linux/build_deb.sh
+      - name: Dependency/license manifest (review before public release)
+        shell: bash
+        run: |
+          python -m pip freeze > "dist/release/dependencies-${{ matrix.label }}.txt"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yasora-${{ matrix.label }}
+          path: dist/release/*
+          if-no-files-found: error
+          retention-days: 30
+  android:
+    name: Android APK (separate limited engine)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Android SDK platform
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Optionally configure persistent release signing
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASS: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KEYSTORE_PASS" ] && [ -n "$KEY_ALIAS" ] && [ -n "$KEY_PASS" ]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/yasora-release.jks"
+            echo "YASORA_KEYSTORE_PATH=$RUNNER_TEMP/yasora-release.jks" >> "$GITHUB_ENV"
+            echo "YASORA_KEYSTORE_PASSWORD=$KEYSTORE_PASS" >> "$GITHUB_ENV"
+            echo "YASORA_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "YASORA_KEY_PASSWORD=$KEY_PASS" >> "$GITHUB_ENV"
+          fi
+      - name: Unit tests and APK build
+        working-directory: android
+        run: |
+          gradle --no-daemon :app:testDebugUnitTest :app:assembleDebug
+          if [ -n "${YASORA_KEYSTORE_PATH:-}" ]; then
+            gradle --no-daemon :app:assembleRelease
+          fi
+      - name: Stage APK
+        run: |
+          mkdir -p dist/release
+          if [ -n "${YASORA_KEYSTORE_PATH:-}" ]; then
+            cp android/app/build/outputs/apk/release/app-release.apk dist/release/Yasora-Studio-Android-signed.apk
+          else
+            cp android/app/build/outputs/apk/debug/app-debug.apk dist/release/Yasora-Studio-Android-DEBUG.apk
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yasora-Android
+          path: dist/release/*.apk
+          if-no-files-found: error
+  draft-release:
+    name: Stage GitHub draft prerelease
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [desktop, android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: yasora-*
+          merge-multiple: true
+          path: release
+      - name: Validate all five installer files exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -lh release
+          test -f release/Yasora-Studio-Windows-x64-Setup.exe
+          test -f release/Yasora-Studio-macOS-arm64.dmg
+          test -f release/Yasora-Studio-macOS-x86_64.dmg
+          test -f release/Yasora-Studio-Linux-amd64.deb
+          compgen -G 'release/*.apk' > /dev/null
+          (cd release && sha256sum * > SHA256SUMS.txt)
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: true
+          files: release/*
+          body: |
+            **Draft QA release — not approved for public distribution.**
+            Desktop bundles Microsoft MarkItDown 0.1.9 with all Python extras.
+            Windows and macOS installers are unsigned unless maintainers implement signing.
+            macOS Gatekeeper may warn for unsigned apps; Windows SmartScreen may warn.
+            Android uses a separate limited offline converter, not Microsoft's Python engine.
+            Android APK signing requires persistent keystore secrets for upgrade continuity.
+            Verify install, conversion, updater, licensing and uninstall on each native OS before making this release public.
